@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Test / quality tool output
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+lint_report.txt
+security_report.json
+dist/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store

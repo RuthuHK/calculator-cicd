@@ -1,0 +1,203 @@
+name: CI/CD pipeline
+
+# Runs on every push to any branch, and on every Pull Request into main.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  # ---------------------------------------------------------------- BUILD
+  build:
+    name: 1. Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Check every source file compiles
+        run: python -m compileall -q src
+
+  # ----------------------------------------------------------------- TEST
+  test:
+    name: 2. Test
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Unit tests
+        run: pytest tests/unit/ -v
+
+      - name: Integration tests
+        shell: bash
+        run: |
+          # pytest exit code 5 means "no tests collected".
+          # That is expected until the CLI feature (with integration tests) is merged.
+          set +e
+          pytest tests/integration/ -v --tb=short
+          code=$?
+          if [ "$code" -eq 5 ]; then
+            echo "No integration tests yet - skipping."
+            exit 0
+          fi
+          exit $code
+
+  # ------------------------------------------------------------- COVERAGE
+  coverage:
+    name: 3. Coverage (>= 80%)
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests with coverage threshold
+        run: >
+          pytest tests/ --cov=src --cov-fail-under=80
+          --cov-report=term-missing --cov-report=html --cov-report=xml
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            htmlcov
+            coverage.xml
+
+  # ----------------------------------------------------------------- LINT
+  lint:
+    name: 4. Lint (pylint >= 7.0)
+    runs-on: ubuntu-latest
+    needs: coverage
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run pylint and enforce minimum score
+        shell: bash
+        run: pylint src/ --fail-under=7.0 | tee lint_report.txt
+
+      - name: Upload lint report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-report
+          path: lint_report.txt
+
+  # --------------------------------------------------------------- FORMAT
+  format:
+    name: 5. Format (black)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Check formatting
+        run: black src/ tests/ --check --diff
+
+  # ------------------------------------------------------------- SECURITY
+  security:
+    name: 6. Security (bandit)
+    runs-on: ubuntu-latest
+    needs: format
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Full security report (all severities, JSON)
+        run: bandit -r src/ -f json -o security_report.json || true
+
+      - name: Fail on high-severity findings
+        run: bandit -r src/ -lll
+
+      - name: Upload security report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: security_report.json
+
+  # ------------------------------------------------------ DEPLOY / PACKAGE
+  deploy:
+    name: 7. Package (CD)
+    runs-on: ubuntu-latest
+    needs: security
+    # Only package code that has landed on main (not feature branches or PRs).
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download coverage report
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-report
+          path: reports/coverage
+        continue-on-error: true
+
+      - name: Build deployment package
+        run: |
+          mkdir -p dist
+          zip -r dist/calculator-package.zip src reports README.md requirements.txt -x "*__pycache__*"
+
+      - name: Upload deployment package
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-package
+          path: dist/calculator-package.zip
