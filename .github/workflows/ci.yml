@@ -1,11 +1,19 @@
 name: CI/CD pipeline
 
-# Runs on every push to any branch, and on every Pull Request into main.
 on:
+  # Every push to any branch...
   push:
     branches: ["**"]
+    # ...EXCEPT when the only files changed are workflow files (like this ci.yml).
+    paths-ignore:
+      - ".github/workflows/**"
+  # Every Pull Request into main (same exception).
   pull_request:
     branches: [main]
+    paths-ignore:
+      - ".github/workflows/**"
+  # Lets you start the pipeline manually from the Actions tab or with gh.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -59,7 +67,6 @@ jobs:
         shell: bash
         run: |
           # pytest exit code 5 means "no tests collected".
-          # That is expected until the CLI feature (with integration tests) is merged.
           set +e
           pytest tests/integration/ -v --tb=short
           code=$?
@@ -176,11 +183,11 @@ jobs:
 
   # ------------------------------------------------------ DEPLOY / PACKAGE
   deploy:
-    name: 7. Package (CD)
+    name: 7. Package & Deploy (CD)
     runs-on: ubuntu-latest
     needs: security
-    # Only package code that has landed on main (not feature branches or PRs).
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Only on main, after every CI stage passed (push or manual run, never on PRs).
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v4
 
@@ -201,3 +208,14 @@ jobs:
         with:
           name: deployment-package
           path: dist/calculator-package.zip
+
+      - name: Deploy to Render
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$RENDER_DEPLOY_HOOK_URL" ]; then
+            echo "RENDER_DEPLOY_HOOK_URL secret is not set - skipping deploy."
+            exit 0
+          fi
+          curl -fsS -X POST "$RENDER_DEPLOY_HOOK_URL"
+          echo "Deploy triggered on Render."
